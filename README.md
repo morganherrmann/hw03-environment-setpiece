@@ -3,6 +3,8 @@
 ### Golden Fantasy Forest
 Morgan Herrmann
 moher@seas.upenn.edu
+ ![Well ](Well_Gold.PNG)
+
 
 ## Assignment Requirements
 #### Animation of the camera or environment elements
