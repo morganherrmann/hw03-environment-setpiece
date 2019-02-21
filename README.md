@@ -5,10 +5,19 @@ Morgan Herrmann
 moher@seas.upenn.edu
  ![Well ](Well_Gold.PNG)
 
+### ShaderToy Link
+https://www.shadertoy.com/view/wdSGWt
+
+#### Shadertoy Instructions
+- Please use image.txt for the main image on ShaderToy. 
+- Under the main image, iChannel0 should be set to the Textures -> "lichen" choice. 
+  Filter: mipmap, Wrap: repeat, VFlip checked.
+- Please use bufferA.txt for Buffer A on shadertoy.
+
 
 ## Assignment Requirements
 #### Animation of the camera or environment elements
-The glitter-tree leaves are animated with respect to time.  Lighting fog color and fog strength also vary with time.
+The glitter trees are animated with respect to time.  Lighting fog color and fog strength also vary with time.  I was aiming for sparkling gold trees that looked alien in nature/ like a swarm of bees (hence the floating leaves).
 #### Three different uses of noise (for color, shape, normal, glow, etc.)
 - iChannel Shadertoy input noise was used to create the base height for the ground.
 - FBM was used to compute the coloring of the ground, by setting a threshhold for red and yellow splotches.
@@ -25,7 +34,7 @@ Many sin displacement functions were used within the trees, as well as smoothste
 Some of the lighting also shifts with respect to time to add more life to the sene.
 
 #### SDF-based soft shadows
-SDF based soft shadows are used to make the scene feel more realistic.  
+SDF based soft shadows are used to make the scene feel more realistic.  The shadowing is especially evident as the light moves around.
 Source for implementing: http://iquilezles.org/www/articles/rmshadows/rmshadows.htm
 
 #### Additional Elements
