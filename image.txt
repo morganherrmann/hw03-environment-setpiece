@@ -1,0 +1,932 @@
+
+
+const int MAX_MARCHING_STEPS = 285;
+const float MIN_DIST = 0.0;
+const float MAX_DIST = 200.0;
+const float EPSILON = 0.001;
+
+
+//0 = well top
+//1 = bucket
+//2 = GROUND
+// 3 = ground
+//4 = TREES TOP
+//5 = TREE TRUNK
+
+int setPiece = 0;
+vec3 curr;
+bool tree_trunk = false;
+bool knot = false;
+float noise = 0.0;
+
+
+/**
+ * Signed distance function for a sphere centered at the origin with radius 1.0;
+ */
+float sphereSDF(vec3 samplePoint) {
+    return length(samplePoint) - 1.0;
+}
+
+//Functions like toolbox and union
+float opUnion( float d1, float d2 ) {  return min(d1,d2); }
+
+float opSubtraction( float d1, float d2 ) { return max(-d1,d2); }
+
+float opIntersection( float d1, float d2 ) { return max(d1,d2); }
+
+float opSmoothUnion( float d1, float d2, float k ) {
+    float h = clamp( 0.5 + 0.5*(d2-d1)/k, 0.0, 1.0 );
+    return mix( d2, d1, h ) - k*h*(1.0-h); }
+
+
+//DOT2 FUNCTION
+float dot2( in vec2 v ) { return dot(v,v); }
+
+float Noise2D( in vec2 x )
+{
+    ivec2 p = ivec2(floor(x));
+    vec2 f = fract(x);
+	f = f*f*(3.0-2.0*f);
+	ivec2 uv = p.xy;
+	float rgA = texelFetch( iChannel0, (uv+ivec2(0,0))&255, 0 ).x;
+    float rgB = texelFetch( iChannel0, (uv+ivec2(1,0))&255, 0 ).x;
+    float rgC = texelFetch( iChannel0, (uv+ivec2(0,1))&255, 0 ).x;
+    float rgD = texelFetch( iChannel0, (uv+ivec2(1,1))&255, 0 ).x;
+    return mix( mix( rgA, rgB, f.x ),
+                mix( rgC, rgD, f.x ), f.y );
+}
+
+float ComputeFBM(in vec2 pos )
+{
+    float amplitude = 1.0;
+    float sum = 0.0;
+    float maxAmp = 0.0;
+    for(int i = 0; i < 8; ++i)
+    {
+        sum += Noise2D(pos) * amplitude;
+        maxAmp += amplitude;
+        amplitude *= 0.5;
+        pos *= 2.0;
+    }
+    noise = sum / maxAmp;
+    return sum / maxAmp;
+}
+
+
+
+/**
+*The base of the well
+*/
+
+float sdRoundedCylinder( vec3 p, float ra, float rb, float h, mat4 trans )
+{
+    
+    vec4 pos = vec4(p, 1.0);
+    
+    pos = trans *  pos;
+    
+    p = pos.xyz;
+    
+    vec2 d = vec2( length(p.xz)-2.0*ra+rb, abs(p.y) - h );
+    return min(max(d.x,d.y),0.0) + length(max(d,0.0)) - rb;
+}
+
+/*BOX FUNCTION
+*/
+float sdBox( vec3 p, vec3 b )
+{
+  vec3 d = abs(p) - b;
+  return length(max(d,0.0))
+         + min(max(d.x,max(d.y,d.z)),0.0); // remove this line for an only partially signed sdf 
+}
+
+/*
+*Arms of the well
+*/
+float sdVerticalCapsule( vec3 p, float h, float r, mat4 trans)   
+{
+    
+    
+    vec4 pos = vec4(p, 1.0);
+    pos = trans *  pos;
+    
+    p = pos.xyz;
+    
+    p.y -= clamp( p.y, 0.0, h );
+    return length( p ) - r;
+}
+
+/*
+* The hat of the well
+*/
+
+ 	float sdCone( vec3 p, vec2 c , mat2 rot)
+{
+    // c must be normalized
+    p.xz *= rot;
+    float q = length(p.xy);
+    return dot(c,vec2(q,p.z));
+}
+
+//FUNCTION FOR CYLINDER 
+
+float gap( vec3 p, vec2 h )
+{
+  vec2 d = abs(vec2(length(p.xz),p.y)) - h;
+  return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+}
+
+float sdVerticalCapsule( vec3 p, float h, float r )
+{
+    p.y -= clamp( p.y, 0.0, h );
+    return length( p ) - r;
+}
+
+float sdEllipsoid( in vec3 p, in vec3 r )
+{
+    float k0 = length(p/r);
+    float k1 = length(p/(r*r));
+    return k0*(k0-1.0)/k1;
+}
+
+/*Capped cylinder
+*/
+float sdCappedCone( in vec3 p, in float h, in float r1, in float r2, mat2 rot, mat4 trans )
+{
+    
+    vec4 pos = vec4(p, 1.0);
+    pos = trans *  pos;
+    p = pos.xyz;
+    
+    p.xz *= rot;
+    //p.zy *= rot;
+    
+    
+    
+    vec2 q = vec2( length(p.xz), p.y );
+    
+    vec2 k1 = vec2(r2,h);
+    vec2 k2 = vec2(r2-r1,2.0*h);
+    vec2 ca = vec2(q.x-min(q.x,(q.y < 0.0)?r1:r2), abs(q.y)-h);
+    vec2 cb = q - k1 + k2*clamp( dot(k1-q,k2)/dot2(k2), 0.0, 1.0 );
+    float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
+    return s*sqrt( min(dot2(ca),dot2(cb)) );
+}
+
+float sdCappedCylinder( vec3 p, vec2 h )
+{
+  vec2 d = abs(vec2(length(p.xz),p.y)) - h;
+  return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+}
+
+
+
+//function to create the body of the well
+
+float createWell(vec3 samplePoint){
+    
+    mat4 trans = mat4(1.0);
+    trans[3][0] = 0.95;
+    trans[3][1] = 0.5;
+    float base = sdRoundedCylinder(samplePoint, 0.15, 0.04, 0.2, trans);
+    float base_hollow = sdRoundedCylinder(samplePoint, 0.10, 0.06, 0.2, trans);
+    base = opSubtraction(base_hollow, base);
+    trans = mat4(1.0);
+    trans[3][0] = 0.95;
+    trans[3][1] = 0.8;
+    float rim = sdRoundedCylinder(samplePoint, 0.18, 0.04, 0.06, trans);
+    
+    trans = mat4(1.0);
+    trans[3][0] = 1.2;
+    trans[3][1] = 0.7;
+    float column = sdVerticalCapsule(samplePoint, 0.9, 0.04, trans);
+    
+    trans = mat4(1.0);
+    trans[3][0] = 0.70;
+    trans[3][1] = 0.7;
+    float column2 = sdVerticalCapsule(samplePoint, 0.9, 0.04, trans);
+    
+    mat2 rot;
+  	rot[0][0] =cos(radians(-45.0));
+  	rot[0][1] =sin(radians(-45.0));
+  	rot[1][0] =-sin(radians(-45.0));
+  	rot[1][1] =cos(radians(-45.0));
+    
+    trans = mat4(1.0);
+    trans[3][1] = -0.45;
+    trans[3][0] = 0.95;
+    float hat = sdCappedCone(samplePoint, 0.3, 0.35, 0.15, rot, trans);
+    
+    rot[0][0] =cos(radians(-90.0));
+  	rot[0][1] =sin(radians(-90.0));
+  	rot[1][0] =-sin(radians(-90.0));
+  	rot[1][1] =cos(radians(-90.0));
+    
+    trans[3][0] = -0.05;
+    trans[3][1] = -0.95;
+    
+    samplePoint.yx *= rot;
+    
+    vec4 pos = vec4(samplePoint, 1.0);
+    pos = trans * pos;
+        
+    float bar = sdCappedCylinder(pos.xyz, vec2(0.02, 0.4));
+    float knot = sdEllipsoid(pos.xyz, vec3(0.05, 0.07, 0.09));
+    
+    
+    trans[3][0] = 0.95;
+    trans[3][1] = 0.47;
+    samplePoint.xy *= rot;
+    float rope = sdVerticalCapsule(samplePoint, 0.49, 0.02, trans);
+    
+    //hat = opSmoothUnion(hat, column, 0.10);
+    //hat = opSmoothUnion(hat, column2, 0.10);
+    rim = opSmoothUnion(rim, base, 0.1);
+    bar = opSmoothUnion(bar, column, 0.04);
+    bar = opSmoothUnion(bar, column2, 0.04);
+    //knot = opSmoothUnion(bar, knot, 0.04);
+    //rope = opSmoothUnion(rope, knot, 0.02);
+    
+    //setPiece = 0;
+    
+
+
+    
+    float mini =  min(min(min(min(rim, rope), min(base,knot)), min(bar, hat)), min(column, column2));
+    
+    if (mini == knot){
+     setPiece = 10;   
+    }
+    return mini;
+}
+
+
+float createBucket(vec3 samplePoint){
+    
+    mat2 rot;
+  	rot[0][0] =cos(radians(-55.0));
+  	rot[0][1] =sin(radians(-55.0));
+  	rot[1][0] =-sin(radians(-55.0));
+  	rot[1][1] =cos(radians(-55.0));
+    
+    mat4 trans = mat4(1.0);
+    trans[3][1] = 1.90;
+    trans[3][0] = -0.60;
+    trans[3][2] = 1.95;
+    
+    vec4 pos = vec4(samplePoint, 1.0);
+    pos = trans *  pos;
+    samplePoint = pos.xyz;
+    samplePoint.zy *= rot;
+    samplePoint.xy *= rot;
+    
+    float hat = sdCappedCone(samplePoint, 0.15, 0.10, 0.15, rot, trans);
+    float hat_hollow = sdCappedCone(samplePoint, 0.152, 0.09, 0.14,rot, trans);
+    hat = opSubtraction(hat_hollow, hat);
+    
+    
+    return hat;
+    
+    
+}
+
+float createArch(vec3 samplePoint){
+    
+    mat4 trans = mat4(1.0);
+    trans[3][1] = -0.25;
+    trans[3][0] = -1.25;
+    trans[3][2] = -1.5;
+    
+    vec4 pos = vec4(samplePoint, 1.0);
+    pos = trans *  pos;
+   
+    
+    float arch = sdBox(pos.xyz, vec3(3.9, 2.9, 1.8));
+    
+    trans = mat4(1.0);
+    trans[3][1] = 0.75;
+    trans[3][0] = 0.35;
+    trans[3][2] = -1.5;
+    
+    mat2 rot;
+    rot[0][0] =cos(radians(-90.0));
+  	rot[0][1] =sin(radians(-90.0));
+  	rot[1][0] =-sin(radians(-90.0));
+  	rot[1][1] =cos(radians(-90.0));
+    
+   	pos.xyz = samplePoint;
+    
+    pos = trans * pos;
+    pos.yz *= rot;
+    
+    
+    
+    float gap = gap(pos.xyz, vec2(1.85, 2.99));
+    //return arch;
+    return opSubtraction(gap, arch);  
+}
+
+
+
+//FUNCTION TO CREATE THE LADDER
+float createLadder(vec3 samplePoint){
+    
+    mat2 rot;
+    rot[0][0] =cos(radians(-25.0));
+  	rot[0][1] =sin(radians(-25.0));
+  	rot[1][0] =-sin(radians(-25.0));
+  	rot[1][1] =cos(radians(-25.0));
+    
+    vec4 pos = vec4(samplePoint, 1.0);
+    mat4 trans = mat4(1.0);
+    trans[3][1] = 0.9;
+    pos = trans * pos;
+    //pos *= rot;
+    
+    float left = sdVerticalCapsule( pos.xyz, 1.5, 0.03 );
+    
+    
+   	pos.xyz = samplePoint;
+    trans[3][0] = 0.25;
+    pos = trans * pos;
+    
+    float right = sdVerticalCapsule( pos.xyz, 1.5, 0.03 );
+    
+    
+    //mat2 rot;
+  	rot[0][0] =cos(radians(-90.0));
+  	rot[0][1] =sin(radians(-90.0));
+  	rot[1][0] =-sin(radians(-90.0));
+  	rot[1][1] =cos(radians(-90.0));
+    
+    trans[3][1] = 0.8;
+    pos.xyz = samplePoint;
+    pos = trans * pos;
+    pos.xy *= rot;
+   	float rung = sdVerticalCapsule( pos.xyz, 0.25, 0.03 );
+    
+    trans[3][1] = 0.5;
+    pos.xyz = samplePoint;
+    pos = trans * pos;
+    pos.xy *= rot;
+   	rung = min(rung , sdVerticalCapsule( pos.xyz, 0.25, 0.03 ));
+    
+    trans[3][1] = 0.5;
+    pos.xyz = samplePoint;
+    pos = trans * pos;
+    pos.xy *= rot;
+   	rung = min(rung , sdVerticalCapsule( pos.xyz, 0.25, 0.03 ));
+    
+    trans[3][1] = 0.15;
+    pos.xyz = samplePoint;
+    pos = trans * pos;
+    pos.xy *= rot;
+   	rung = min(rung , sdVerticalCapsule( pos.xyz, 0.25, 0.03 ));
+    
+    trans[3][1] = -0.1;
+    pos.xyz = samplePoint;
+    pos = trans * pos;
+    pos.xy *= rot;
+   	rung = min(rung , sdVerticalCapsule( pos.xyz, 0.25, 0.03 ));
+    
+    trans[3][1] = -0.34;
+    pos.xyz = samplePoint;
+    pos = trans * pos;
+    pos.xy *= rot;
+   	rung = min(rung , sdVerticalCapsule( pos.xyz, 0.25, 0.03 ));
+    
+   
+    
+   
+    pos = trans * pos;
+    //pos.xy *= rot;
+    
+    
+    
+    //do the rungs
+   
+    
+    return min(right,min(left, rung));
+    
+    
+}
+
+float displacement(vec3 p){
+  return sin(20.f * p.x + noise)*sin(20.f*p.y + cos(iTime / 100.0))*sin(20.f *p.z);
+}
+
+
+float createTrees(vec3 p, mat4 trunk){
+    
+    vec4 pos = vec4(p, 1.0); 
+    pos = trunk * pos;
+   
+    
+    //TRUNK OF THE TREE
+   float base = sdVerticalCapsule(pos.xyz, 3.9, 0.2) + noise / 3.5;
+    
+   pos.xyz = p;
+   trunk[3][1] -= 2.900;
+   pos = trunk * pos;
+    
+    p = pos.xyz;
+    
+    
+   vec3 d = abs(p) - vec3(1.0, 1.0, 1.0);
+   float insideDistance = min(max(d.x, max(d.y, d.z)), 0.0);
+
+   float outsideDistance = length(max(d, 0.0));
+    
+    vec3 r = vec3(1.0, 1.0, 1.0);
+    float k0 = length(p/r);
+    float k1 = length(p/(r*r));
+    float leaves =  k0*(k0-1.0)/k1 + displacement(p);
+    
+   	
+    if (leaves < base){
+         setPiece = 4;
+        return leaves;
+       
+    } else {
+        tree_trunk = true;
+        setPiece = 5;
+        return base;
+    }
+    //return min(leaves, base);
+    
+    
+    
+}
+
+
+
+
+ 	float sdPlane( vec3 p, vec4 n )
+{
+  // n must be normalized
+  return dot(p,n.xyz) + n.w;
+}
+
+float Noise(int x, int y){
+    return (fract(sin(dot(vec2(x, y), vec2(12.9898, 4.1414))) * 43758.5453));
+}
+
+float interpNoise2D(float x, float y){
+
+    int intX =  int(x);
+    float fractX = fract(x);
+    int intY = int(y);
+    float fractY = fract(y);
+
+    float v1 = Noise(intX, intY);
+    float v2 = Noise(intX + 1, intY);
+    float v3 = Noise(intX, intY + 1);
+    float v4 = Noise(intX + 1, intY + 1);
+
+    float i1 = mix(v1, v2, fractX);
+    float i2 = mix(v3, v4, fractX);
+
+    return mix(i1, i2, fractY);
+
+}
+
+//FUNCTION FOR THE GROUND FBM
+float fbm(float x, float y){
+
+    float total = 0.f;
+    float peristence = 0.5f;
+    float octaves = 1.f;
+
+    for(float i = 0.f; i < octaves; i++){
+        float freq = pow(2.f, i);
+        float amp = pow(peristence, i);
+        total += interpNoise2D((x * freq), (y * freq)) * amp;
+    }
+
+    return total;
+
+}
+
+
+float createGround(vec3 samplePoint){
+    
+   	vec4 pos;
+    pos = vec4(samplePoint, 1.0);
+  
+    mat4 trans = mat4(1.0);
+    trans[3][1] = 1.10;
+    
+    pos = trans * pos;
+    
+    pos.y += ComputeFBM(pos.xz);
+    
+    return sdBox(pos.xyz, vec3(14.8, 0.2, 70.0));
+    
+    
+    
+}
+
+
+float minTree(vec3 samplePoint){
+    
+    mat4 trunk = mat4(1.0);
+    trunk[3][0] = -1.8;
+    trunk[3][1] = 1.2;
+    trunk[3][2] = 3.70;
+    
+    float tree = createTrees(samplePoint, trunk);
+    
+    trunk[3][0] = 0.0;
+    trunk[3][1] = 1.7;
+    trunk[3][2] = 10.70;
+    
+    float tree2 = createTrees(samplePoint, trunk);
+    
+    trunk[3][0] = 7.0;
+    trunk[3][1] = 1.7;
+    trunk[3][2] = 16.70;
+    
+    float tree3 = createTrees(samplePoint, trunk);
+    
+    trunk[3][0] = 6.0;
+    trunk[3][1] = 1.7;
+    trunk[3][2] = 18.70;
+    
+    float tree4 = createTrees(samplePoint, trunk);
+    
+    trunk[3][0] = 2.6;
+    trunk[3][1] = 1.5;
+    trunk[3][2] = 22.70;
+    
+    float tree5 = createTrees(samplePoint, trunk);
+    
+    trunk[3][0] = -2.6;
+    trunk[3][1] = 1.5;
+    trunk[3][2] = 14.70;
+    
+    float tree6 = createTrees(samplePoint, trunk);
+    
+    trunk[3][0] = -4.6;
+    trunk[3][1] = 1.8;
+    trunk[3][2] = 10.70;
+    
+    float tree7 = createTrees(samplePoint, trunk);
+    
+    trunk[3][0] = -1.6;
+    trunk[3][1] = 1.8;
+    trunk[3][2] = 24.70;
+    
+    float tree8 = createTrees(samplePoint, trunk);
+    
+    trunk[3][0] = -2.6;
+    trunk[3][1] = 1.7;
+    trunk[3][2] = 2.70;
+    
+    float tree9 = createTrees(samplePoint, trunk);
+    
+    
+    tree = min(tree, tree2);
+    tree = min(tree, tree3);
+    tree = min(tree, tree4);
+    tree = min(tree, tree5);
+    tree = min(tree, tree6);
+    tree = min(tree, tree7);
+    tree = min(tree, tree8);
+    tree = min(tree, tree9);
+    
+    return tree;
+    
+    
+}
+
+
+/**
+ * Signed distance function describing the scene.
+ */
+float sceneSDF(vec3 samplePoint) {
+    //return sphereSDF(samplePoint);
+    
+    curr = samplePoint;
+    
+    float mi = 10000.0;
+    
+    
+    
+    float well = createWell(samplePoint);
+    if (well < mi){
+        
+        mi = well;
+        //tree_trunk = false;
+        setPiece = 0;
+        
+    }
+    
+
+    float bucket = createBucket(samplePoint);
+    if (bucket < mi){
+        
+        mi = bucket;
+        //tree_trunk = false;
+        setPiece = 0;
+        
+    }
+    
+    
+    float ground = createGround(samplePoint);
+    if (ground < mi){
+        
+        mi = ground;
+        //tree_trunk = false;
+        setPiece = 2;
+        
+    }
+    
+    float tree = minTree(samplePoint);
+    if (tree < mi){
+        
+        mi = tree;
+        setPiece = 4;
+        
+    }
+    
+    float grass = opSmoothUnion(ground, well, 1.25);
+    
+    if (grass < mi){
+        
+        mi = grass;
+        //tree_trunk = false;
+        setPiece = 0;
+        
+    }
+    
+    
+    float bucket_grass = opSmoothUnion(ground, bucket, 0.12);
+    if (bucket_grass < mi){
+        
+        mi = bucket_grass;
+        //tree_trunk = false;
+        setPiece = 0;
+        
+    }
+    
+    
+
+    tree = opSmoothUnion(tree, ground, 0.62);
+    
+    return min(tree, min(grass, bucket));
+}
+
+/**
+ * Shortest Distance to Surface
+ */
+float shortestDistanceToSurface(vec3 eye, vec3 marchingDirection, float start, float end) {
+    float depth = start;
+    for (int i = 0; i < MAX_MARCHING_STEPS; i++) {
+        float dist = sceneSDF(eye + depth * marchingDirection);
+        if (dist < EPSILON) {
+			return depth;
+        }
+        depth += dist;
+        if (depth >= end) {
+            return end;
+        }
+    }
+    return end;
+}
+            
+
+/**
+ * Return the normalized direction to march in from the eye point for a single pixel.
+*/
+
+vec3 rayDirection(float fieldOfView, vec2 size, vec2 fragCoord) {
+    vec2 xy = fragCoord - size / 2.0;
+    float z = size.y / tan(radians(fieldOfView) / 2.0);
+    return normalize(vec3(xy, -z));
+}
+
+/**
+ * Using the gradient of the SDF, estimate the normal on the surface at point p.
+ */
+vec3 estimateNormal(vec3 p) {
+    return normalize(vec3(
+        sceneSDF(vec3(p.x + EPSILON, p.y, p.z)) - sceneSDF(vec3(p.x - EPSILON, p.y, p.z)),
+        sceneSDF(vec3(p.x, p.y + EPSILON, p.z)) - sceneSDF(vec3(p.x, p.y - EPSILON, p.z)),
+        sceneSDF(vec3(p.x, p.y, p.z  + EPSILON)) - sceneSDF(vec3(p.x, p.y, p.z - EPSILON))
+    ));
+}
+
+/**
+ * Lighting contribution of a single point light source via Phong illumination.
+ * 
+ * The vec3 returned is the RGB color of the light's contribution.
+ *
+ * k_a: Ambient color
+ * k_d: Diffuse color
+ * k_s: Specular color
+ * alpha: Shininess coefficient
+ * p: position of point being lit
+ * eye: the position of the camera
+ * lightPos: the position of the light
+ * lightIntensity: color/intensity of the light
+ *
+ * 
+ */
+vec3 phongContribForLight(vec3 k_d, vec3 k_s, float alpha, vec3 p, vec3 eye,
+                          vec3 lightPos, vec3 lightIntensity) {
+    vec3 N = estimateNormal(p);
+    vec3 L = normalize(lightPos - p);
+    vec3 V = normalize(eye - p);
+    vec3 R = normalize(reflect(-L, N));
+    
+    float dotLN = dot(L, N);
+    float dotRV = dot(R, V);
+    
+    if (dotLN < 0.0) {
+        // Light not visible from this point on the surface
+        return vec3(0.0, 0.0, 0.0);
+    } 
+    
+    if (dotRV < 0.0) {
+        // Light reflection in opposite direction as viewer, apply only diffuse
+        // component
+        return lightIntensity * (k_d * dotLN);
+    }
+    return lightIntensity * (k_d * dotLN + k_s * pow(dotRV, alpha));
+}
+
+/**
+ * Lighting by Phong illumination.
+*/
+
+vec3 phongIllumination(vec3 k_a, vec3 k_d, vec3 k_s, float alpha, vec3 p, vec3 eye) {
+    const vec3 ambientLight = 0.5 * vec3(1.0, 1.0, 1.0);
+    vec3 color = ambientLight * k_a;
+    
+    vec3 light1Pos = vec3(40.0 * 1.0 * sin(iTime * noise),
+                          2.0,
+                          20.0 * 1.0 );//* cos(iTime));
+    vec3 light1Intensity = vec3(0.4, 0.4, 0.4);
+    
+    color += phongContribForLight(k_d, k_s, alpha, p, eye,
+                                  light1Pos,
+                                  light1Intensity);
+    
+    vec3 light2Pos = vec3(2.0 * 1.0,//sin(0.37 * iTime),
+                          7.0 * 1.0,//cos(0.37 * iTime),
+                          2.0);
+    vec3 light2Intensity = vec3(0.4, 0.4, 0.4);
+    
+    color += phongContribForLight(k_d, k_s, alpha, p, eye,
+                                  light2Pos,
+                                  light2Intensity);
+    
+     vec3 light3Pos = vec3(4.0, 3.2, 10.0);
+    
+    vec3 light3Intensity = vec3(0.4, 0.4, 0.4);
+    
+    color += phongContribForLight(k_d, k_s, alpha, p, eye,
+                                  light3Pos,
+                                  light3Intensity); 
+    
+    return color;
+}
+
+vec3 palette( in float t, in vec3 a, in vec3 b, in vec3 c, in vec3 d )
+{
+    return a + b*cos( 6.28318*(c*t+d) );
+}
+
+vec3 applyFog( in vec3  rgb,       // original color of the pixel
+               in float distance ) // camera to point distance
+{
+    float fogAmount = 1.0 - exp(-1.0  * distance* 0.035 * clamp(sin(iTime), 0.7, 1.0) );
+    vec3 a = vec3(0.4,0.4,0.4);
+	vec3 b = vec3(0.4,0.5,0.6);
+	vec3 c = vec3(1.0,1.0,1.0);
+	vec3 d = vec3(0.2,0.10,0.1);
+    
+    a = vec3(0.45,0.15,0.3);
+    b = vec3(0.4,0.2,0.3);
+    c = vec3(1.0,1.0,1.0);
+    d = vec3(0.6,0.3,0.25);
+    vec3 pal = palette(sin(iTime / 5.0), a, b, c, d);
+    
+    
+vec3 colorA = vec3(0.421,0.420,0.430);
+vec3 colorB = vec3(0.475,0.317,0.237);
+    vec3 finalcol = mix(colorA, colorB, sin(iTime / 5.0));
+    vec3  fogColor  = finalcol;//vec3(0.4,0.5,0.6);
+        return mix( rgb, fogColor, fogAmount );
+}
+
+float softshadow( in vec3 ro, in vec3 rd, float mint, float maxt, float k )
+{
+    float res = 1.0;
+    for( float t = mint; t < maxt; )
+    {
+        float h = sceneSDF(ro + rd*t);
+        if( h<0.001 )
+            return 0.0;
+        res = min(res, k*h/t );
+        t += h;
+    }
+    return res;
+}
+
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord )
+{
+	vec3 dir = rayDirection(45.0, iResolution.xy, fragCoord);
+    vec3 eye = vec3(0.0, 0.0, 5.0);
+    float dist = shortestDistanceToSurface(eye, dir, MIN_DIST, MAX_DIST);
+    
+    if (dist > MAX_DIST - EPSILON) {
+        // Didn't hit anything
+        vec3 fog = applyFog( vec3(0.13, 0.17, 0.15), dist );
+        fragColor = vec4(fog, 0.0);
+		return;
+    }
+    
+    // The closest point on the surface to the eyepoint along the view ray
+    vec3 p = eye + dist * dir;
+    
+    
+    
+    vec3 K_a = vec3(0.4, 0.2, 0.2);
+    vec3 K_d = vec3(0.7, 0.2, 0.2);
+    vec3 K_s = vec3(1.0, 1.0, 1.0);
+    float shininess = 10.0;
+    float mixer;
+    
+    
+    if (setPiece == 2){
+        
+        mixer = mix(0.3, 0.35, curr.y);
+       	K_a = vec3(0.35, mixer, 0.21);
+    	K_d = vec3(0.37, 0.25, 0.21);
+    	K_s = vec3(0.1, 0.1, 0.10);
+        shininess = 1.0;
+        
+    } else if (setPiece == 4){
+        
+        mixer = mix(0.55, 0.65, curr.y);
+       	K_a = vec3(0.72, mixer, 0.27);
+    	K_d = vec3(0.77, 0.65, 0.31);
+    	K_s = vec3(0.1, 0.1, 0.10);
+        shininess = 1.0;
+        
+    } else if (setPiece == 1){
+        
+         mixer = mix(0.3, 0.35, curr.y);
+       	K_a = vec3(0.39, mixer, 0.25);
+    	K_d = vec3(0.37, 0.25, 0.21);
+    	K_s = vec3(0.1, 0.1, 0.10);
+        shininess = 70.0;
+        
+    } else if (setPiece == 3 || setPiece == 0){
+        
+        mixer = mix(0.3, 0.45, curr.y);
+       	K_a = vec3(0.45, mixer, 0.21);
+    	K_d = vec3(0.37, mixer, 0.21);
+    	K_s = vec3(0.9, 0.9, 0.90);
+        shininess = 10.0;
+        
+    }
+    
+    if (setPiece == 0 || knot){
+        mixer = mix(0.3, 0.65, curr.y / 10.0);
+       	K_a = vec3(0.51, mixer, 0.27);
+    	K_d = vec3(0.77, 0.65, 0.31);
+    	K_s = vec3(0.1, 0.1, 0.10);
+        shininess = 1.0;
+        
+        
+    }
+    
+    
+    vec3 color = phongIllumination(K_a, K_d, K_s, shininess, p, eye);
+    
+    color = applyFog( color, dist );
+    color.g -= softshadow( p, eye, 0.1, 200.0, 1.0 );
+    
+    //normalize (position of the light and p)
+    
+    vec3 shadow = vec3(2.0, 7.0, 2.0);
+    vec3 test = normalize(shadow - p);
+    float darkness = softshadow(eye, test, 0.1, 300.0, 7.1 );
+    color *= darkness;
+     
+    vec3 shadow2 = vec3(40.0, 2.0, 20.0);
+  //  test = normalize(shadow2 - p);
+   // darkness += softshadow(eye, test, 0.1, 300.0, 4.1 );
+   // color *= darkness;
+    
+   // vec3 shadow3 = vec3(4.0, 3.2, 10.0);
+   // test = normalize(shadow3 - p);
+    //darkness += softshadow(eye, test, 0.3, 300.0, 2.1 );
+    
+    //color *= darkness;
+    
+    fragColor = vec4(color / 1.0, 1.0);
+}
